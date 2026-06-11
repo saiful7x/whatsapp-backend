@@ -10,7 +10,6 @@ const fs = require('fs');
 const app = express();
 const server = http.createServer(app);
 
-// Blogger থেকে Socket কানেকশন আসার জন্য CORS অনুমোদন
 const io = new Server(server, { 
     cors: { 
         origin: "*", 
@@ -34,11 +33,11 @@ io.on('connection', (socket) => {
 
             const sessionFolder = path.join('/tmp/sessions', formattedNumber);
 
-            // 🚨 কানেকশন এরর ও ক্র্যাশ দূর করতে পূর্বে জমে থাকা ত্রুটিযুক্ত ফাইল সম্পূর্ণ ডিলেট করা
+            // পুরাতন ও ত্রুটিযুক্ত সেশন ফাইল মুছে ফেলা
             if (fs.existsSync(sessionFolder)) {
                 try {
                     fs.rmSync(sessionFolder, { recursive: true, force: true });
-                    console.log(`পুরাতন ত্রুটিযুক্ত সেশন ফোল্ডার রিমুভ করা হয়েছে: ${formattedNumber}`);
+                    console.log(`পুরাতন সেশন ফোল্ডার রিমুভ করা হয়েছে: ${formattedNumber}`);
                 } catch (e) {
                     console.error("ফোল্ডার ডিলিট করতে সমস্যা:", e);
                 }
@@ -46,11 +45,16 @@ io.on('connection', (socket) => {
 
             const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
 
+            // অপ্টিমাইজড সকেট কনফিগারেশন (ক্র্যাশ এবং টাইমআউট এড়ানোর জন্য)
             sock = makeWASocket({
                 auth: state,
                 printQRInTerminal: false,
                 logger: pino({ level: 'silent' }),
-                browser: ["Chrome (Linux)", "", ""] // পেয়ারিং কোড জেনারেট করার জন্য এটি সবচেয়ে বেশি স্টেবল
+                browser: ["Mac OS", "Chrome", "101.0.4951.67"], // অত্যন্ত স্টেবল ব্রাউজার সিগনেচার
+                keepAliveIntervalMs: 30000, // ৩০ সেকেন্ড পর পর পিং পাঠিয়ে সেশন সচল রাখবে
+                connectTimeoutMs: 60000, // কানেকশন টাইমআউট বাড়াবে
+                syncFullHistory: false, // 🚨 অত্যন্ত গুরুত্বপূর্ণ: চ্যাট হিস্ট্রি সিঙ্ক বন্ধ করবে যাতে ফ্রী সার্ভার ক্র্যাশ না করে
+                markOnlineOnConnect: true
             });
 
             sock.ev.on('creds.update', saveCreds);
@@ -77,7 +81,6 @@ io.on('connection', (socket) => {
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                     console.log(`কানেকশন বন্ধ হয়েছে (কোড: ${statusCode})। রিকানেক্ট: ${shouldReconnect}`);
                     
-                    // কানেকশন ফেইল হলে সেশন ফোল্ডার ক্লিন করা
                     if (!shouldReconnect) {
                         try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch (e) {}
                     }
@@ -85,7 +88,7 @@ io.on('connection', (socket) => {
                     socket.emit('status_update', 'কানেকশন বন্ধ হয়েছে। আবার চেষ্টা করুন।');
                     pairingRequested = false;
                 } else if (connection === 'open') {
-                    console.log(`✅ সফলভাবে সেশন লিঙ্ক হয়েছে: ${formattedNumber}`);
+                    console.log(`✅ সফল সেশন লিঙ্কড: ${formattedNumber}`);
                     socket.emit('link_success', { phoneNumber: formattedNumber, name });
                 }
             });
@@ -101,7 +104,6 @@ io.on('connection', (socket) => {
     });
 });
 
-// Blogger API সাপোর্ট
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE");
