@@ -1,8 +1,7 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const makeWASocket = require('@whiskeysockets/baileys').default;
-const { useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
@@ -24,7 +23,6 @@ if (!fs.existsSync('/tmp/sessions')) {
 io.on('connection', (socket) => {
     console.log('নতুন ইউজার যুক্ত হয়েছে:', socket.id);
     let sock = null;
-    let pairingRequested = false;
 
     socket.on('request_pairing_code', async ({ phoneNumber, name }) => {
         try {
@@ -33,6 +31,7 @@ io.on('connection', (socket) => {
 
             const sessionFolder = path.join('/tmp/sessions', formattedNumber);
 
+            // পুরাতন ও ত্রুটিযুক্ত সেশন ফাইল মুছে ফেলা
             if (fs.existsSync(sessionFolder)) {
                 try {
                     fs.rmSync(sessionFolder, { recursive: true, force: true });
@@ -44,36 +43,37 @@ io.on('connection', (socket) => {
 
             const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
 
+            // অপ্টিমাইজড সকেট কনফিগারেশন
             sock = makeWASocket({
                 auth: state,
                 printQRInTerminal: false,
                 logger: pino({ level: 'silent' }),
-                browser: ["Mac OS", "Chrome", "101.0.4951.67"], 
+                browser: Browsers.macOS('Chrome'), // 🚨 মোস্ট ইম্পর্টেন্ট: পেয়ারিং সাকসেস করার জন্য অফিসিয়াল রিকমেন্ডেড ব্রাউজার
                 keepAliveIntervalMs: 30000, 
                 connectTimeoutMs: 60000, 
-                syncFullHistory: false, 
+                syncFullHistory: false, // ফ্রী সার্ভার ক্র্যাশ এড়াতে হিস্ট্রি সিঙ্ক অফ
                 markOnlineOnConnect: true
             });
 
             sock.ev.on('creds.update', saveCreds);
 
-            sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, qr } = update;
-                
-                // 🚨 সংশোধন: শুধুমাত্র QR ইভেন্ট ট্রিগার হলে একটিই কোড রিকোয়েস্ট করা হবে
-                if (qr && !pairingRequested) {
-                    pairingRequested = true;
+            // 🚨 নতুন ও স্টেবল পেয়ারিং কোড রিকোয়েস্ট মেথড (৪ সেকেন্ডের ডিলে দিয়ে ফাস্ট-ট্র্যাক রিকোয়েস্ট)
+            if (!sock.authState.creds.registered) {
+                setTimeout(async () => {
                     try {
-                        console.log(`আসল কোড রিকোয়েস্ট করা হচ্ছে...`);
+                        console.log(`হোয়াটসঅ্যাপ কোড রিকোয়েস্ট করা হচ্ছে...`);
                         const code = await sock.requestPairingCode(formattedNumber);
-                        console.log(`সফল কোড: ${code}`);
+                        console.log(`সফল পেয়ারিং কোড: ${code}`);
                         socket.emit('pairing_code', { code: code });
                     } catch (err) {
                         console.error("কোড জেনারেট এরর:", err);
                         socket.emit('error_message', 'কোড জেনারেট করা যায়নি। আবার চেষ্টা করুন।');
-                        pairingRequested = false;
                     }
-                }
+                }, 4000); // ৪ সেকেন্ড ডিলে
+            }
+
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect } = update;
                 
                 if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -85,7 +85,6 @@ io.on('connection', (socket) => {
                     }
                     
                     socket.emit('status_update', 'কানেকশন বন্ধ হয়েছে। আবার চেষ্টা করুন।');
-                    pairingRequested = false;
                 } else if (connection === 'open') {
                     console.log(`✅ সফল সেশন লিঙ্কড: ${formattedNumber}`);
                     socket.emit('link_success', { phoneNumber: formattedNumber, name });
