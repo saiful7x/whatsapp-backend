@@ -33,7 +33,6 @@ io.on('connection', (socket) => {
 
             const sessionFolder = path.join('/tmp/sessions', formattedNumber);
 
-            // পুরাতন ও ত্রুটিযুক্ত সেশন ফাইল মুছে ফেলা
             if (fs.existsSync(sessionFolder)) {
                 try {
                     fs.rmSync(sessionFolder, { recursive: true, force: true });
@@ -45,15 +44,14 @@ io.on('connection', (socket) => {
 
             const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
 
-            // অপ্টিমাইজড সকেট কনফিগারেশন (ক্র্যাশ এবং টাইমআউট এড়ানোর জন্য)
             sock = makeWASocket({
                 auth: state,
                 printQRInTerminal: false,
                 logger: pino({ level: 'silent' }),
-                browser: ["Mac OS", "Chrome", "101.0.4951.67"], // অত্যন্ত স্টেবল ব্রাউজার সিগনেচার
-                keepAliveIntervalMs: 30000, // ৩০ সেকেন্ড পর পর পিং পাঠিয়ে সেশন সচল রাখবে
-                connectTimeoutMs: 60000, // কানেকশন টাইমআউট বাড়াবে
-                syncFullHistory: false, // 🚨 অত্যন্ত গুরুত্বপূর্ণ: চ্যাট হিস্ট্রি সিঙ্ক বন্ধ করবে যাতে ফ্রী সার্ভার ক্র্যাশ না করে
+                browser: ["Mac OS", "Chrome", "101.0.4951.67"], 
+                keepAliveIntervalMs: 30000, 
+                connectTimeoutMs: 60000, 
+                syncFullHistory: false, 
                 markOnlineOnConnect: true
             });
 
@@ -62,10 +60,11 @@ io.on('connection', (socket) => {
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr } = update;
                 
-                if ((qr || connection === 'connecting') && !pairingRequested) {
+                // 🚨 সংশোধন: শুধুমাত্র QR ইভেন্ট ট্রিগার হলে একটিই কোড রিকোয়েস্ট করা হবে
+                if (qr && !pairingRequested) {
                     pairingRequested = true;
                     try {
-                        console.log(`হোয়াটসঅ্যাপ কোড রিকোয়েস্ট করা হচ্ছে...`);
+                        console.log(`আসল কোড রিকোয়েস্ট করা হচ্ছে...`);
                         const code = await sock.requestPairingCode(formattedNumber);
                         console.log(`সফল কোড: ${code}`);
                         socket.emit('pairing_code', { code: code });
@@ -109,6 +108,50 @@ app.use((req, res, next) => {
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE");
     res.header("Access-Control-Allow-Headers", "Content-Type");
     next();
+});
+
+// 📩 লিঙ্কড হওয়া যেকোনো নম্বর থেকে মেসেজ পাঠানোর API
+app.get('/send', async (req, res) => {
+    const from = req.query.from; // যে অ্যাকাউন্ট লিঙ্ক করেছেন (যেমন: 8801333961696)
+    const to = req.query.to;     // যাকে মেসেজ পাঠাবেন (যেমন: 88017XXXXXXXX)
+    const message = req.query.message; // মেসেজ টেক্সট
+
+    if (!from || !to || !message) {
+        return res.status(400).json({ error: 'from, to, and message are required. Example: /send?from=8801333961696&to=8801700000000&message=Hello' });
+    }
+
+    const cleanFrom = from.replace(/[^0-9]/g, '');
+    let cleanTo = to.replace(/[^0-9]/g, '');
+    if (!cleanTo.endsWith('@s.whatsapp.net')) {
+        cleanTo = cleanTo + '@s.whatsapp.net';
+    }
+
+    const sessionFolder = path.join('/tmp/sessions', cleanFrom);
+    if (!fs.existsSync(sessionFolder)) {
+        return res.status(404).json({ error: 'Sender session not found or not linked yet' });
+    }
+
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
+        const client = makeWASocket({
+            auth: state,
+            logger: pino({ level: 'silent' })
+        });
+
+        client.ev.on('creds.update', saveCreds);
+
+        client.ev.on('connection.update', async (update) => {
+            const { connection } = update;
+            if (connection === 'open') {
+                await client.sendMessage(cleanTo, { text: message });
+                client.end(); // মেসেজ পাঠানোর পর কানেকশন বন্ধ হবে
+                return res.json({ success: true, message: 'Message sent successfully!' });
+            }
+        });
+
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/api/linked-users', (req, res) => {
